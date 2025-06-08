@@ -2,11 +2,11 @@ from supabase_client import supabase
 
 def fetch_matching_employees(query: str):
     # Simplistic keyword-based matching across multiple columns
-    response = supabase.table("employees").select("*").ilike("Full_Name", f"%{query}%").execute()
+    response = supabase.table("qag_employees").select("*").ilike("full_name", f"%{query}%").execute()
     results = response.data
 
     if not results:
-        response = supabase.table("employees").select("*").ilike("Position", f"%{query}%").execute()
+        response = supabase.table("qag_employees").select("*").ilike("position", f"%{query}%").execute()
         results = response.data
 
     return results
@@ -18,12 +18,12 @@ def format_response(records):
     formatted = []
     for r in records:
         formatted.append({
-            "👤 الاسم الكامل": r["Full_Name"],
-            "🎖️ الرتبة": r["Rank"],
-            "🛡️ المنصب": r["Position"],
-            "💰 الراتب الأساسي": f"{r['Base_Salary']} QAR",
-            "🏠 بدل السكن": f"{r['Housing_Allowance']} QAR",
-            "📅 تاريخ آخر إجازة": r["Last_Leave_Date"],
-            "🧮 مدة الإجازة": f"{r['Last_Leave_Duration_Days']} يومًا"
+            "👤 الاسم الكامل": r["full_name"],
+            "🎖️ الرتبة": r["rank"],
+            "🛡️ المنصب": r["position"],
+            "💰 الراتب الأساسي": f"{r['base_salary']} QAR",
+            "🏠 بدل السكن": f"{r['housing_allowance']} QAR",
+            "📅 تاريخ آخر إجازة": r["last_leave_date"],
+            "🧮 مدة الإجازة": f"{r['last_leave_duration_days']} يومًا"
         })
     return formatted
