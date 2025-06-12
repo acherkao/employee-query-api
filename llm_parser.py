@@ -1,110 +1,81 @@
 import os
-import json # Import the json library
+import json
 from dotenv import load_dotenv
-import openai # Corrected import
+import openai
 
-# --- Best Practice: Load environment variables at the start ---
+# --- Setup ---
 load_dotenv()
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- Correctly instantiate the client and configure the API key ---
-# The API key is fetched from environment variables and passed directly.
-# If OPENAI_API_KEY is in your .env, the client will find it automatically.
-# Explicitly passing it like this is also perfectly fine and clear.
-client = openai.OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
 
-# In llm_parser.py
-# In llm_parser.py
+def parse_query_to_filter(query: str, last_context: dict | None = None) -> dict:
+    """
+    Classifies a query into an intent. If 'last_context' is provided, it uses it
+    to understand follow-up questions for a single-user demo.
+    """
+    
+    # Dynamically build the context part of the prompt
+    context_prompt = "No previous context is available. This is a new query."
+    if last_context:
+        # Create a simplified summary of the last answer for the LLM
+        summary_list = [r.get("full_name") for r in last_context.get("raw_results", [])]
+        if summary_list:
+            context_prompt = f"The previous query returned a list of these people: {summary_list}. The user might be asking a follow-up question about one of them."
+    
+    system_prompt = f"""
+You are a query analysis engine for a single-user demo. You will receive the latest user query and, optionally, the context from the last answer.
+Your job is to classify the user's query into an intent and extract all parameters into a valid JSON object.
+If the query is a follow-up (e.g., uses 'he', 'she', 'it', 'their'), you MUST use the provided context to resolve it.
 
-def parse_query_to_filter(query: str):
-    system_prompt = """
-You are a query analysis engine. Your job is to classify a user's natural language query into a specific intent and extract all parameters into a valid JSON object.
+# CONTEXT FROM PREVIOUS TURN
+{context_prompt}
+
+# EXAMPLE OF CONTEXT RESOLUTION
+- CONTEXT: The previous query returned ['Salman Al Hajri']
+- CURRENT QUERY: "does he have a loan?"
+- YOUR THOUGHT PROCESS: The user is asking about a loan. I will check the `total_loan` and `remaining_loan` columns. I will resolve "he" to 'Salman Al Hajri' and request those columns so the system can formulate a complete answer.
+- YOUR JSON OUTPUT: {{"intent": "filter", "conditions": [{{"column": "full_name", "operator": "eq", "value": "Salman Al Hajri"}}], "columns": ["total_loan", "remaining_loan", "full_name"]}}
 
 # AVAILABLE INTENTS AND THEIR JSON FORMATS
-
-1.  **intent: "filter"**
-    - **Use Case:** Searching for specific records based on conditions.
-    - **JSON:** `{"intent": "filter", "conditions": [{"column": "...", "operator": "...", "value": ...}, ...]}`
-    - **Example:** "all colonels with salary over 22000" -> `{"intent": "filter", "conditions": [{"column": "rank", "operator": "eq", "value": "عقيد"}, {"column": "base_salary", "operator": "gt", "value": 22000}]}`
-
-2.  **intent: "aggregate_count"**
-    - **Use Case:** Counting records grouped by a specific category.
-    - **JSON:** `{"intent": "aggregate_count", "dimension": "column_to_group_by"}`
-    - **Example:** "married vs single" -> `{"intent": "aggregate_count", "dimension": "marital_status"}`
-
-3.  **intent: "aggregate_metric"**
-    - **Use Case:** Calculating a sum, average, min, or max of a numeric column, grouped by a category.
-    - **JSON:** `{"intent": "aggregate_metric", "dimension": "column_to_group_by", "metric": "avg|sum|min|max", "metric_column": "column_to_calculate"}`
-    - **Example:** "average salary per rank" -> `{"intent": "aggregate_metric", "dimension": "rank", "metric": "avg", "metric_column": "base_salary"}`
-
-4.  **intent: "ordered_list"**
-    - **Use Case:** Finding the top or bottom records based on a certain column.
-    - **JSON:** `{"intent": "ordered_list", "order_by_column": "...", "ascending": true|false, "limit": integer}`
-    - **Example:** "top 5 highest paid" -> `{"intent": "ordered_list", "order_by_column": "base_salary", "ascending": false, "limit": 5}`
-
-5.  **intent: "unsupported"**
-    - **Use Case:** When the user's question cannot be answered with the available tools or data.
-    - **JSON:** `{"intent": "unsupported", "reason": "A brief explanation"}`
-    - **Example:** "what's the weather like?" -> `{"intent": "unsupported", "reason": "I can only answer questions about employee data."}`
-
-6.  **intent: "conditional_aggregate_count"**
-    - **Use Case:** Counting records grouped by a category, but only for a subset of data that matches certain conditions.
-    - **JSON:** `{"intent": "conditional_aggregate_count", "dimension": "...", "conditions": [{"column": "...", "operator": "...", "value": ...}]}`
-    - **Example:** "count of married vs single, but only for Group Commanders" -> `{"intent": "conditional_aggregate_count", "dimension": "marital_status", "conditions": [{"column": "position", "operator": "eq", "value": "قائد مجموعة"}]}`
-
-7.  **intent: "find_top_group"**
-    - **Use Case:** Finding which single category/group has the absolute highest or lowest value for a specific calculation (max, avg, sum).
-    - **JSON:** `{"intent": "find_top_group", "dimension": "...", "metric_column": "...", "metric": "max|avg|sum|min", "ranking": "highest|lowest"}`
-    - **Example:** "Which rank has the highest housing allowance?" -> `{"intent": "find_top_group", "dimension": "rank", "metric_column": "housing_allowance", "metric": "max", "ranking": "highest"}`
-    - **Example:** "Which position has the lowest average salary?" -> `{"intent": "find_top_group", "dimension": "position", "metric_column": "base_salary", "metric": "avg", "ranking": "lowest"}`
+1.  **intent: "filter"** - For searching for records. If a user asks for a specific field (e.g., "what is his rank?"), add a "columns" key with the specific database column(s). If no specific columns are asked for, omit the "columns" key.
+    `{{"intent": "filter", "conditions": [...], "columns": ["column_name", ...]}}`
+2.  **intent: "aggregate_count"** - For counting records grouped by a category. Use this only when a user asks to count "by" or "per" a category (e.g., "count by rank").
+    `{{"intent": "aggregate_count", "dimension": "column_to_group_by"}}`
+3.  **intent: "aggregate_metric"** - For calculating sum, avg, min, or max, grouped by a category.
+    `{{"intent": "aggregate_metric", "dimension": "...", "metric": "...", "metric_column": "..."}}`
+4.  **intent: "ordered_list"** - For finding top/bottom records.
+    `{{"intent": "ordered_list", "order_by_column": "...", "ascending": true|false, "limit": integer}}`
+5.  **intent: "conditional_aggregate_count"** - For filtered counting.
+    `{{"intent": "conditional_aggregate_count", "dimension": "...", "conditions": [...]}}`
+6.  **intent: "find_top_group"** - For finding the single best/worst group.
+    `{{"intent": "find_top_group", "dimension": "...", "metric_column": "...", "metric": "...", "ranking": "highest|lowest"}}`
+7.  **intent: "total_count"** - For getting the total number of records, without grouping (e.g., "how many employees are there?").
+    `{{"intent": "total_count"}}`
+8.  **intent: "unsupported"** - When the query cannot be answered.
+    `{{"intent": "unsupported", "reason": "A brief explanation."}}`
 
 # AVAILABLE COLUMNS
-# For searching by name, use 'full_name' for Arabic queries and 'full_name_en' for English queries.
-[full_name, full_name_en, rank, marital_status, base_salary, housing_allowance, last_leave_date, last_leave_duration_days, position]
+- For name searches, use 'full_name' for Arabic and 'full_name_en' for English.
+- [military_id, full_name, rank, marital_status, base_salary, civil_clothing_allowance, military_clothing_allowance, housing_allowance, phone_allowance, unit_allowance, social_allowance, transport_allowance, position_allowance, specialty_allowance, risk_allowance, total_loan, remaining_loan, retirement_deduction, position, enlistment_date, birth_date, annual_leave_balance, grant_leave_balance, emergency_leave_balance, last_leave_date, last_leave_duration_days, full_name_en]
 
 # RULES
-- If the user query includes a name in English, you MUST use the 'full_name_en' column for the filter.
 - ALWAYS respond with a valid JSON object.
-- Default to the "filter" intent for simple lookups.
-- For text comparisons like names or ranks, prefer the `ilike` operator over `eq`.
+- For text comparisons, prefer the `ilike` operator over `eq`.
 """
-    # ... rest of your function
-# ... rest of the function # ^-- Fixed typo from "oyeperator" to "operator"
-
-    user_prompt = f"Query: {query}"
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Latest Query: {query}"}
+    ]
 
     try:
         completion = client.chat.completions.create(
             model="gpt-4-turbo",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
+            messages=messages,
             temperature=0,
-            # Forcing JSON output is a great feature for reliability
             response_format={"type": "json_object"}
         )
-        result_string = completion.choices[0].message.content
-
-        # --- Use the safe json.loads() instead of the dangerous eval() ---
-        return json.loads(result_string)
-
-    except json.JSONDecodeError as e:
-        print(f"JSON parsing error: {e}")
-        print(f"LLM returned a non-JSON string: {result_string}")
-        return None
-    except openai.APIError as e:
-        # Handle API errors from OpenAI
-        print(f"OpenAI API error: {e}")
-        return None
+        return json.loads(completion.choices[0].message.content)
     except Exception as e:
-        # Handle other potential errors
-        print(f"An unexpected error occurred: {e}")
-        return None
-
-# Example Usage:
-# query = "all employees with a base salary greater than 5000"
-# filter_json = parse_query_to_filter(query)
-# if filter_json:
-#     print(json.dumps(filter_json, indent=2))
+        print(f"LLM parsing error: {e}")
+        return {"intent": "unsupported", "reason": f"An error occurred while analyzing the query: {e}"}
