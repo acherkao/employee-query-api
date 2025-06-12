@@ -11,10 +11,12 @@ LAST_CONTEXT_CACHE = {}
 
 app = FastAPI(title="Stateless Demo API with Context Cache")
 
+
 @app.get("/")
 def read_root():
-    """A simple health check endpoint."""
+    """A simple health check endpoint for deployment platforms like Render."""
     return {"status": "ok", "message": "Welcome to the Employee Q&A API!"}
+
 
 class ChatRequest(BaseModel):
     query: str
@@ -31,7 +33,7 @@ def format_to_string_message(intent: str, raw_results: list, parsed_json: dict |
     global LAST_CONTEXT_CACHE
 
     # --- Cache Management: Decide whether to save or clear context ---
-    if intent in ["filter", "ordered_list"]:
+    if intent in ["filter", "ordered_list", "highest_total_compensation"]:
         if not raw_results:
             LAST_CONTEXT_CACHE = {} # Clear cache if no results are found
             return "No matching records found."
@@ -45,11 +47,10 @@ def format_to_string_message(intent: str, raw_results: list, parsed_json: dict |
             record = raw_results[0]
             requested_columns = parsed_json.get("columns")
 
-            # CASE 1: A specific field was requested (e.g., "what is his rank?")
+            # CASE 1: A specific field was requested
             if requested_columns:
                 name = (record.get("full_name_en") or record.get("full_name")) if lang != 'ar' else record.get("full_name")
                 
-                # NEW: Special handling for loan-related questions
                 req_cols_lower = [c.lower() for c in requested_columns]
                 if 'total_loan' in req_cols_lower or 'remaining_loan' in req_cols_lower:
                     total_loan = record.get('Total_Loan', 0) or 0
@@ -65,7 +66,6 @@ def format_to_string_message(intent: str, raw_results: list, parsed_json: dict |
                         else:
                             return f"No, '{name}' does not have any loans."
 
-                # Fallback to generic formatter for other specific fields
                 details_list = [
                     f"{col.replace('_', ' ').title()}: {record.get(col)}"
                     for col in requested_columns if col.lower() not in ["full_name", "full_name_en"] and record.get(col) is not None
@@ -76,7 +76,7 @@ def format_to_string_message(intent: str, raw_results: list, parsed_json: dict |
                 else:
                     return f"For '{name}', the {details_str}."
 
-            # CASE 2: A general detail request (e.g., "details for...")
+            # CASE 2: A general detail request
             else:
                 details = []
                 for key, value in record.items():
@@ -113,7 +113,7 @@ def format_to_string_message(intent: str, raw_results: list, parsed_json: dict |
             
             return f"{header}\n" + "\n".join(lines)
 
-        # CASE 3 (Fallback): Filter with multiple results. Show a summary of names.
+        # CASE 3 (Fallback): Filter with multiple results.
         names_key = 'full_name' if lang == 'ar' else 'full_name_en'
         names = [r.get(names_key) or r.get('full_name') for r in raw_results]
 
@@ -129,7 +129,7 @@ def format_to_string_message(intent: str, raw_results: list, parsed_json: dict |
         LAST_CONTEXT_CACHE = {}
         print("[DEBUG] Clearing context cache for non-list-based intent.")
 
-    # --- Formatting logic for other intents (Unchanged) ---
+    # --- Formatting logic for other intents ---
     if intent == "total_count":
         if not raw_results or "count" not in raw_results[0]:
             return "I could not retrieve the total count."
@@ -138,6 +138,19 @@ def format_to_string_message(intent: str, raw_results: list, parsed_json: dict |
             return f"يوجد إجمالي {total:,} موظف."
         else:
             return f"There are a total of {total:,} employees."
+
+    if intent == "highest_total_compensation" and parsed_json:
+        limit = parsed_json.get("limit", 1)
+        header_en = f"Here are the Top {limit} Employees by Total Compensation:"
+        header_ar = f"إليك أعلى {limit} موظفين حسب إجمالي الراتب:"
+        header = header_ar if lang == 'ar' else header_en
+        lines = [header, "=" * len(header)]
+        for item in raw_results:
+            name = (item.get('full_name_en') or item.get('full_name')) if lang != 'ar' else item.get('full_name')
+            compensation = item.get('total_compensation', 0)
+            lines.append(f"- {name}: {compensation:,.0f}")
+        return "\n".join(lines)
+
     if intent == "find_top_group" and parsed_json:
         if not raw_results: return "Could not determine a top group for this query."
         result = raw_results[0]
@@ -189,7 +202,7 @@ def chat_handler(payload: ChatRequest):
     raw_results = []
     
     try:
-        # --- TOOL ROUTER (Unchanged) ---
+        # --- TOOL ROUTER ---
         if intent == "filter":
             conditions = parsed_json.get("conditions", [])
             columns_to_select = parsed_json.get("columns", ["*"])
@@ -211,6 +224,12 @@ def chat_handler(payload: ChatRequest):
         elif intent == "ordered_list":
             p = parsed_json
             response = supabase.rpc('get_ordered_employees', {'order_by_column': p["order_by_column"], 'is_ascending': p["ascending"], 'limit_count': p["limit"]}).execute()
+            raw_results = response.data
+
+        elif intent == "highest_total_compensation":
+            p = parsed_json
+            limit = p.get("limit", 1)
+            response = supabase.rpc('get_top_employees_by_total_compensation', {'limit_count': limit}).execute()
             raw_results = response.data
 
         elif intent == "aggregate_count":
@@ -239,7 +258,7 @@ def chat_handler(payload: ChatRequest):
 
     except Exception as e:
         print(f"[ERROR] Error executing intent '{intent}': {e}")
-        return {"message": "An error occurred while processing your request."}
+        return {"message": f"An error occurred while processing your request: {e}"}
 
     final_message = format_to_string_message(intent, raw_results, parsed_json, lang)
     
