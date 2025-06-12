@@ -11,6 +11,10 @@ LAST_CONTEXT_CACHE = {}
 
 app = FastAPI(title="Stateless Demo API with Context Cache")
 
+@app.get("/")
+def read_root():
+    """A simple health check endpoint."""
+    return {"status": "ok", "message": "Welcome to the Employee Q&A API!"}
 
 class ChatRequest(BaseModel):
     query: str
