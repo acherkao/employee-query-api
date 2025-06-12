@@ -1,3 +1,5 @@
+--- START OF FILE llm_parser.py ---
+
 import os
 import json
 from dotenv import load_dotenv
@@ -31,27 +33,40 @@ If the query is a follow-up (e.g., uses 'he', 'she', 'it', 'their'), you MUST us
 {context_prompt}
 
 # EXAMPLE OF CONTEXT RESOLUTION
+- CONTEXT: The previous query returned ['Salman Al Hajri', 'Nawaf Al Naimi']
+- CURRENT QUERY: "what is his rank?"
+- YOUR THOUGHT PROCESS: The query is ambiguous as "his" could refer to multiple people. I must ask for clarification.
+- YOUR JSON OUTPUT: {{"intent": "unsupported", "reason": "Which person are you asking about? Please specify a name from the list."}}
+
 - CONTEXT: The previous query returned ['Salman Al Hajri']
-- CURRENT QUERY: "does he have a loan?"
-- YOUR THOUGHT PROCESS: The user is asking about a loan. I will check the `total_loan` and `remaining_loan` columns. I will resolve "he" to 'Salman Al Hajri' and request those columns so the system can formulate a complete answer.
-- YOUR JSON OUTPUT: {{"intent": "filter", "conditions": [{{"column": "full_name", "operator": "eq", "value": "Salman Al Hajri"}}], "columns": ["total_loan", "remaining_loan", "full_name"]}}
+- CURRENT QUERY: "what is his rank?"
+- YOUR THOUGHT PROCESS: "His" clearly refers to 'Salman Al Hajri'. The user wants a specific field, 'rank'. I will use the 'filter' intent, resolve the context to a condition on 'full_name', and specify the 'rank' column in the "columns" key to fetch only that data. I will also include 'full_name' for context.
+- YOUR JSON OUTPUT: {{"intent": "filter", "conditions": [{{"column": "full_name", "operator": "eq", "value": "Salman Al Hajri"}}], "columns": ["rank", "full_name"]}}
+
+# EXAMPLE OF COMPLEX QUERY
+- QUERY: "Who has the highest total compensation?"
+- THOUGHT PROCESS: The user is asking for a complex calculation (sum of salary and allowances) that requires a special tool. I will use the `highest_total_compensation` intent.
+- JSON OUTPUT: {{"intent": "highest_total_compensation", "limit": 1}}
+
 
 # AVAILABLE INTENTS AND THEIR JSON FORMATS
-1.  **intent: "filter"** - For searching for records. If a user asks for a specific field (e.g., "what is his rank?"), add a "columns" key with the specific database column(s). If no specific columns are asked for, omit the "columns" key.
-    `{{"intent": "filter", "conditions": [...], "columns": ["column_name", ...]}}`
-2.  **intent: "aggregate_count"** - For counting records grouped by a category. Use this only when a user asks to count "by" or "per" a category (e.g., "count by rank").
-    `{{"intent": "aggregate_count", "dimension": "column_to_group_by"}}`
+1.  **intent: "filter"** - For searching for records.
+    `{{"intent": "filter", "conditions": [...], "columns": [...]}}`
+2.  **intent: "aggregate_count"** - For counting records grouped by a category.
+    `{{"intent": "aggregate_count", "dimension": "..."}}`
 3.  **intent: "aggregate_metric"** - For calculating sum, avg, min, or max, grouped by a category.
     `{{"intent": "aggregate_metric", "dimension": "...", "metric": "...", "metric_column": "..."}}`
-4.  **intent: "ordered_list"** - For finding top/bottom records.
+4.  **intent: "ordered_list"** - For finding top/bottom records based on a SINGLE, EXISTING column.
     `{{"intent": "ordered_list", "order_by_column": "...", "ascending": true|false, "limit": integer}}`
-5.  **intent: "conditional_aggregate_count"** - For filtered counting.
+5.  **intent: "highest_total_compensation"** - **USE ONLY** for questions about "total compensation", "total pay", or "salary plus allowances". This calculates the sum of all salary and allowance fields.
+    `{{"intent": "highest_total_compensation", "limit": integer}}`
+6.  **intent: "conditional_aggregate_count"** - For filtered counting.
     `{{"intent": "conditional_aggregate_count", "dimension": "...", "conditions": [...]}}`
-6.  **intent: "find_top_group"** - For finding the single best/worst group.
+7.  **intent: "find_top_group"** - For finding the single best/worst group based on an aggregation of an EXISTING column.
     `{{"intent": "find_top_group", "dimension": "...", "metric_column": "...", "metric": "...", "ranking": "highest|lowest"}}`
-7.  **intent: "total_count"** - For getting the total number of records, without grouping (e.g., "how many employees are there?").
+8.  **intent: "total_count"** - For getting the total number of all records.
     `{{"intent": "total_count"}}`
-8.  **intent: "unsupported"** - When the query cannot be answered.
+9.  **intent: "unsupported"** - When the query cannot be answered.
     `{{"intent": "unsupported", "reason": "A brief explanation."}}`
 
 # AVAILABLE COLUMNS
@@ -61,6 +76,7 @@ If the query is a follow-up (e.g., uses 'he', 'she', 'it', 'their'), you MUST us
 # RULES
 - ALWAYS respond with a valid JSON object.
 - For text comparisons, prefer the `ilike` operator over `eq`.
+- DO NOT invent new column names like 'total_compensation'. Use the specific intents provided for complex calculations.
 """
     
     messages = [
