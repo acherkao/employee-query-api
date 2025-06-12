@@ -1,100 +1,141 @@
-# main.py - Final Stateless Rich Response Engine
-
 import json
 from fastapi import FastAPI
 from pydantic import BaseModel
-from llm_parser import parse_query_to_filter # Your powerful multi-tool parser
+from llm_parser import parse_query_to_filter
 from supabase_client import supabase
 
-app = FastAPI(title="Stateless Employee Info API")
+# --- GLOBAL CACHE FOR SINGLE-USER DEMO ---
+# This dictionary will hold the context of the last "list-based" query.
+# It is NOT safe for a multi-user environment.
+LAST_CONTEXT_CACHE = {}
 
-# --- DATA MODELS ---
-# Back to the simplest request model, as requested.
+app = FastAPI(title="Stateless Demo API with Context Cache")
+
+
 class ChatRequest(BaseModel):
     query: str
 
-# In main.py, near the top with other helpers
-
 def detect_language(text: str) -> str:
     """Detects if the primary language of the text is Arabic or English."""
-    # A simple heuristic: check for a significant number of Arabic characters.
     arabic_chars = sum(1 for char in text if '\u0600' <= char <= '\u06FF')
-    if arabic_chars > 2:  # A small threshold to avoid being triggered by single words
-        return 'ar'
-    return 'en'
+    return 'ar' if arabic_chars > 2 else 'en'
 
-# --- HELPER FORMATTERS ---
-def format_detailed_records(records: list) -> list:
-    """Formats full employee records for the 'detailed_results' field."""
-    if not records: return []
-    return [
-        {
-            "👤 الاسم الكامل": r.get("full_name"),
-            "🎖️ الرتبة": r.get("rank"),
-            "🛡️ المنصب": r.get("position"),
-            "💰 الراتب الأساسي": f"{r.get('base_salary', 0)} QAR",
-            "🏠 بدل السكن": f"{r.get('housing_allowance', 0)} QAR",
-            "📅 تاريخ آخر إجازة": r.get("last_leave_date"),
-            "🧮 مدة الإجازة": f"{r.get('last_leave_duration_days', 0)} يومًا"
-        } for r in records
-    ]
-
-# In main.py
-
-def create_rich_response(intent: str, raw_results: list, parsed_json: dict | None, lang: str = 'en') -> dict:
+def format_to_string_message(intent: str, raw_results: list, parsed_json: dict | None, lang: str = 'en') -> str:
     """
-    Builds the final, structured JSON response based on the intent, supporting multiple languages.
+    Builds a single, formatted string message as the final output and manages the global cache.
     """
-    
-    # --- Handler for list-based results ---
+    global LAST_CONTEXT_CACHE
+
+    # --- Cache Management: Decide whether to save or clear context ---
     if intent in ["filter", "ordered_list"]:
         if not raw_results:
-            return {"response_type": "empty", "message": "No matching records found."}
+            LAST_CONTEXT_CACHE = {} # Clear cache if no results are found
+            return "No matching records found."
         
-        message = f"I found {len(raw_results)} matching employees."
-        if lang == 'ar':
-            message = f"لقد وجدت {len(raw_results)} موظفًا مطابقًا."
-
-        return {
-            "response_type": "list_summary",
-            "message": message,
-            "summary_list": [r.get("full_name") for r in raw_results],
-            "detailed_results": format_detailed_records(raw_results)
-        }
-    
-    # --- Handler for counting results ---
-    if intent in ["aggregate_count", "conditional_aggregate_count"] and parsed_json:
-        dimension = parsed_json.get("dimension", "data").replace('_', ' ').title()
-        title = f"Analysis of Count by {dimension}"
-        if lang == 'ar':
-             title = f"تحليل العدد حسب {dimension}" # Simple translation, can be improved
+        # This is a list-based query, so we SAVE its results to the cache for follow-ups.
+        LAST_CONTEXT_CACHE = {"raw_results": raw_results}
+        print(f"[DEBUG] Caching {len(raw_results)} records for next turn.")
         
-        lines = [title, "=" * len(title)]
-        for item in raw_results:
-            lines.append(f"- {item.get('category')}: {item.get('count'):,}")
-        return {"response_type": "analysis", "message": "\n".join(lines)}
+        # --- Specific Formatting for Filter Intent ---
+        if intent == "filter" and len(raw_results) == 1 and parsed_json:
+            record = raw_results[0]
+            requested_columns = parsed_json.get("columns")
 
-    # --- Handler for metric aggregation (avg, sum, etc.) ---
-    if intent == "aggregate_metric" and parsed_json:
-        p = parsed_json
-        dimension = p.get("dimension", "data").replace('_', ' ').title()
-        metric = p.get("metric", "value").capitalize()
-        title = f"Analysis of {metric} by {dimension}"
+            # CASE 1: A specific field was requested (e.g., "what is his rank?")
+            if requested_columns:
+                name = (record.get("full_name_en") or record.get("full_name")) if lang != 'ar' else record.get("full_name")
+                
+                # NEW: Special handling for loan-related questions
+                req_cols_lower = [c.lower() for c in requested_columns]
+                if 'total_loan' in req_cols_lower or 'remaining_loan' in req_cols_lower:
+                    total_loan = record.get('Total_Loan', 0) or 0
+                    if total_loan > 0:
+                        remaining_loan = record.get('Remaining_Loan', 0) or 0
+                        if lang == 'ar':
+                            return f"نعم، لدى '{name}' قرض إجمالي بقيمة {total_loan:,.0f} والمبلغ المتبقي هو {remaining_loan:,.0f}."
+                        else:
+                            return f"Yes, '{name}' has a total loan of {total_loan:,.0f} with {remaining_loan:,.0f} remaining."
+                    else:
+                        if lang == 'ar':
+                            return f"لا، ليس لدى '{name}' أي قروض قائمة."
+                        else:
+                            return f"No, '{name}' does not have any loans."
+
+                # Fallback to generic formatter for other specific fields
+                details_list = [
+                    f"{col.replace('_', ' ').title()}: {record.get(col)}"
+                    for col in requested_columns if col.lower() not in ["full_name", "full_name_en"] and record.get(col) is not None
+                ]
+                details_str = ", ".join(details_list)
+                if lang == 'ar':
+                     return f"'{name}' لديه {details_str}."
+                else:
+                    return f"For '{name}', the {details_str}."
+
+            # CASE 2: A general detail request (e.g., "details for...")
+            else:
+                details = []
+                for key, value in record.items():
+                    if value is not None and key not in ['id', 'created_at']:
+                        formatted_key = key.replace('_', ' ').title()
+                        details.append(f"- {formatted_key}: {value}")
+                
+                name = record.get('full_name') if lang == 'ar' else (record.get('full_name_en') or record.get('full_name'))
+                header = f"إليك تفاصيل '{name}':\n" if lang == 'ar' else f"Here are the details for '{name}':\n"
+                return header + "\n".join(details)
+
+        # --- Specific Formatting for Ordered List Intent ---
+        elif intent == "ordered_list" and parsed_json:
+            p = parsed_json
+            order_col = p.get("order_by_column", "value")
+            is_ascending = p.get("ascending", False)
+            limit = p.get("limit", len(raw_results))
+            
+            lines = []
+            for record in raw_results:
+                name = (record.get('full_name_en') or record.get('full_name')) if lang != 'ar' else record.get('full_name')
+                value = record.get(order_col)
+                formatted_value = f"{value:,.2f}" if isinstance(value, (int, float)) else f"{value:,}"
+                lines.append(f"- {name}: {formatted_value}")
+            
+            order_col_formatted = order_col.replace('_', ' ').title()
+            ranking_word = "Bottom" if is_ascending else "Top"
+            
+            if lang == 'ar':
+                ranking_word_ar = "أقل" if is_ascending else "أعلى"
+                header = f"إليك {ranking_word_ar} {limit} موظفين حسب '{order_col_formatted}':"
+            else:
+                header = f"Here are the {ranking_word} {limit} employees by '{order_col_formatted}':"
+            
+            return f"{header}\n" + "\n".join(lines)
+
+        # CASE 3 (Fallback): Filter with multiple results. Show a summary of names.
+        names_key = 'full_name' if lang == 'ar' else 'full_name_en'
+        names = [r.get(names_key) or r.get('full_name') for r in raw_results]
+
         if lang == 'ar':
-            title = f"تحليل {metric} حسب {dimension}"
+            message = f"لقد وجدت {len(raw_results)} موظفًا مطابقًا:\n" + "\n".join([f"- {name}" for name in names])
+            message += "\n\nيمكنك السؤال عن تفاصيل شخص معين أو طلب 'عرض كل التفاصيل'."
+        else:
+            message = f"I found {len(raw_results)} matching employees:\n" + "\n".join([f"- {name}" for name in names])
+            message += "\n\nYou can ask for details about a specific person or say 'show all details'."
+        return message
+    else:
+        # For any other intent, clear the cache.
+        LAST_CONTEXT_CACHE = {}
+        print("[DEBUG] Clearing context cache for non-list-based intent.")
 
-        lines = [title, "=" * len(title)]
-        for item in raw_results:
-            value = item.get('value', 0)
-            formatted_value = f"{value:,.2f}" if isinstance(value, float) else f"{value:,}"
-            lines.append(f"- {item.get('category')}: {formatted_value}")
-        return {"response_type": "analysis", "message": "\n".join(lines)}
-
-    # --- Handler for finding the top/bottom group ---
+    # --- Formatting logic for other intents (Unchanged) ---
+    if intent == "total_count":
+        if not raw_results or "count" not in raw_results[0]:
+            return "I could not retrieve the total count."
+        total = raw_results[0].get("count", 0)
+        if lang == 'ar':
+            return f"يوجد إجمالي {total:,} موظف."
+        else:
+            return f"There are a total of {total:,} employees."
     if intent == "find_top_group" and parsed_json:
-        if not raw_results:
-            return {"response_type": "analysis", "message": "Could not determine a top group for this query."}
-        
+        if not raw_results: return "Could not determine a top group for this query."
         result = raw_results[0]
         p = parsed_json
         dimension_name = p.get("dimension", "category").replace('_', ' ').title()
@@ -103,81 +144,66 @@ def create_rich_response(intent: str, raw_results: list, parsed_json: dict | Non
         category = result.get("category")
         value = result.get("value", 0)
         formatted_value = f"{value:,.2f}" if isinstance(value, float) else f"{value:,}"
+        return f"The {dimension_name} with the {ranking_word} {metric_name} is '{category}', with a value of {formatted_value}."
 
-        # --- Multilingual Message Assembly ---
-        if lang == 'ar':
-            # This is a simplified translation map. A more robust solution might be needed for all columns.
-            dimension_map_ar = {"Rank": "الرتبة", "Housing Allowance": "بدل السكن", "Position": "المنصب"}
-            ranking_map_ar = {"highest": "الأعلى", "lowest": "الأدنى"}
-            
-            dimension_name_ar = dimension_map_ar.get(dimension_name, dimension_name)
-            metric_name_ar = dimension_map_ar.get(metric_name, metric_name)
-            ranking_word_ar = ranking_map_ar.get(ranking_word.lower(), ranking_word)
-            
-            message = f"{dimension_name_ar} التي لديها {ranking_word_ar} {metric_name_ar} هي '{category}'، بقيمة {formatted_value}."
-        else:
-            message = f"The {dimension_name} with the {ranking_word} {metric_name} is '{category}', with a value of {formatted_value}."
-        
-        return {"response_type": "analysis", "message": message}
-
-    # --- Handler for unsupported queries ---
+    if intent in ["aggregate_count", "conditional_aggregate_count"] and parsed_json:
+        dimension = parsed_json.get("dimension", "data").replace('_', ' ').title()
+        title = f"Analysis of Count by {dimension}"
+        lines = [title, "=" * len(title)]
+        for item in raw_results:
+            lines.append(f"- {item.get('category')}: {item.get('count'):,}")
+        return "\n".join(lines)
+    
+    if intent == "aggregate_metric" and parsed_json:
+        p = parsed_json
+        dimension = p.get("dimension", "data").replace('_', ' ').title()
+        metric = p.get("metric", "value").capitalize()
+        title = f"Analysis of {metric} by {dimension}"
+        lines = [title, "=" * len(title)]
+        for item in raw_results:
+            value = item.get('value', 0)
+            formatted_value = f"{value:,.2f}" if isinstance(value, float) else f"{value:,}"
+            lines.append(f"- {item.get('category')}: {formatted_value}")
+        return "\n".join(lines)
+    
     if intent == "unsupported" and parsed_json:
-        reason = parsed_json.get("reason", "I am unable to answer that type of question.")
-        return {"response_type": "error", "message": reason}
-        
-    # --- Final fallback if no other condition is met ---
-    return {"response_type": "error", "message": "Could not process the request."}
+        return parsed_json.get("reason", "I am unable to answer that question.")
 
-# --- MASTER ENDPOINT ---
+    return "I could not process the request."
+
+
 @app.post("/chat")
 def chat_handler(payload: ChatRequest):
-    
-    # ...
-    lang = detect_language(payload.query) # <-- DETECT LANGUAGE HERE
-    print(f"[DEBUG] Detected language: {lang}")
-    # ...
-    """
-    Stateless endpoint that returns a rich, structured response for the client UI to handle.
-    It takes only a 'query' and returns a comprehensive JSON object.
-    """
+    lang = detect_language(payload.query)
     print(f"\n[DEBUG] Received query: '{payload.query}'")
-    parsed_json = parse_query_to_filter(payload.query)
+    
+    # Pass the current query AND the globally cached context to the parser
+    parsed_json = parse_query_to_filter(payload.query, LAST_CONTEXT_CACHE)
+    
     print(f"[DEBUG] LLM classified intent: {parsed_json}")
-
-    if not parsed_json or "intent" not in parsed_json:
-        return {"response_type": "error", "message": "I'm sorry, I couldn't understand your request."}
-
     intent = parsed_json.get("intent")
     raw_results = []
     
     try:
-        # --- TOOL ROUTER ---
+        # --- TOOL ROUTER (Unchanged) ---
         if intent == "filter":
             conditions = parsed_json.get("conditions", [])
+            columns_to_select = parsed_json.get("columns", ["*"])
+            select_string = ",".join(columns_to_select)
+
             if conditions:
-                supa_query = supabase.table("qag_employees").select("*")
+                supa_query = supabase.table("qag_employees").select(select_string)
                 for f in conditions:
                     operator, column, value = f.get("operator", "eq"), f.get("column"), f.get("value")
                     query_value = f"%{value}%" if operator == "ilike" else value
                     supa_query = getattr(supa_query, operator)(column, query_value)
                 raw_results = supa_query.execute().data
         
-        # ADD THIS NEW ELIF BLOCK
-        elif intent == "conditional_aggregate_count":
-            p = parsed_json
-            conditions = p.get("conditions", [])
-            # The conditions JSON from the LLM can be passed directly to the function!
-            response = supabase.rpc(
-                'get_conditional_counts_by_dimension',
-                {
-                    'dimension_column': p["dimension"],
-                    'filters': conditions
-                }
-            ).execute()
-            raw_results = response.data
-            return create_rich_response(intent, raw_results, parsed_json, lang)
+        elif intent == "total_count":
+            response = supabase.table("qag_employees").select('*', count='exact').execute()
+            if response.count is not None:
+                raw_results = [{"count": response.count}]
 
-        
         elif intent == "ordered_list":
             p = parsed_json
             response = supabase.rpc('get_ordered_employees', {'order_by_column': p["order_by_column"], 'is_ascending': p["ascending"], 'limit_count': p["limit"]}).execute()
@@ -193,30 +219,24 @@ def chat_handler(payload: ChatRequest):
             response = supabase.rpc('get_aggregate_by_dimension', {'metric_column': p["metric_column"], 'dimension_column': p["dimension"], 'metric_type': p["metric"]}).execute()
             raw_results = response.data
         
+        elif intent == "conditional_aggregate_count":
+            p = parsed_json
+            conditions = p.get("conditions", [])
+            response = supabase.rpc('get_conditional_counts_by_dimension', {'dimension_column': p["dimension"], 'filters': conditions}).execute()
+            raw_results = response.data
         
         elif intent == "find_top_group":
             p = parsed_json
-            # Translate the LLM's friendly word ("highest") to the function's boolean
             is_desc = (p.get("ranking") == "highest")
-            
-            response = supabase.rpc(
-                'get_top_category_by_metric',
-                {
-                    'dimension_column': p["dimension"],
-                    'metric_column': p["metric_column"],
-                    'metric_type': p["metric"],
-                    'is_descending': is_desc
-                }
-            ).execute()
+            response = supabase.rpc('get_top_category_by_metric', {'dimension_column': p["dimension"], 'metric_column': p["metric_column"], 'metric_type': p["metric"], 'is_descending': is_desc}).execute()
             raw_results = response.data
-            # The formatter will now handle the display
-            return create_rich_response(intent, raw_results, parsed_json, lang)
         
-        # --- ADD THIS ENTIRE 'ELIF' BLOCK HERE ---
-        elif intent == "unsupported":
-            print("[DEBUG] LLM classified the query as unsupported.")
-            # We call the formatter, which will extract the reason from the JSON
-            return create_rich_response(intent, [], parsed_json, lang)    
+        # Intent 'unsupported' requires no data fetching, it's handled by the formatter.
+
     except Exception as e:
         print(f"[ERROR] Error executing intent '{intent}': {e}")
-        return {"response_type": "error", "message": "An error occurred while processing your request."}
+        return {"message": "An error occurred while processing your request."}
+
+    final_message = format_to_string_message(intent, raw_results, parsed_json, lang)
+    
+    return {"message": final_message}
